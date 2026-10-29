@@ -1,6 +1,6 @@
 {
- "name": "Tichu",
- "short_name": "Tichu",
+ "name": "Three Blinds",
+ "short_name": "Three Blinds",
  "id": "./",
  "start_url": "./",
  "scope": "./",
@@ -8,7 +8,7 @@
  "orientation": "any",
  "background_color": "#101a16",
  "theme_color": "#101a16",
- "description": "A climbing card game for 3: play the AI with a coach, or friends online.",
+ "description": "A tactical card game for three players: play the AI with a coach, or friends online.",
  "icons": [
   {
    "src": "icons/icon-192.png",
