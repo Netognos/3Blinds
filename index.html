@@ -8192,7 +8192,7 @@ if(typeof document!=='undefined' && document.addEventListener && typeof window!=
 
 
 /*@@TL-ENGINE-END@@*/
-const APP_VERSION = '2026-11-09a', PROTOCOL_VERSION = 3;
+const APP_VERSION = '2026-11-11a', PROTOCOL_VERSION = 3;
 /* =====================================================================
    THREE LANTERNS — PvP layer
    ---------------------------------------------------------------------
@@ -8609,14 +8609,22 @@ function peerOptions(){
    stays silent for HEARTBEAT_DROP_MS is treated as disconnected and the AI
    takes their seat, and a client that stops hearing the host gives up. */
 const HEARTBEAT_EVERY_MS = 3000;
-const HEARTBEAT_DROP_MS = 10000;
+const HEARTBEAT_DROP_MS = 20000;   // 11 November: was 10 s, too quick for a phone that briefly switches apps
 const lastSeen = {};          // host: seat -> timestamp of last message
 let lastHostSeen = 0;         // client: timestamp of last message from host
 let heartbeatTimer = null;
 function startHeartbeat(){
   if(heartbeatTimer) return;
+  let hbLast = Date.now();
   heartbeatTimer = window.setInterval(()=>{
-    const now = Date.now();
+    const now = Date.now(), gap = now - hbLast; hbLast = now;
+    // 11 November: if this device itself was asleep (screen off, app in the background), the silence was ours, not theirs:
+    // start counting again instead of dropping everybody the moment we wake up
+    if(gap > HEARTBEAT_EVERY_MS*3){
+      if(MODE==='host') Object.keys(lastSeen).forEach(k=>{ lastSeen[k] = now; });
+      else if(MODE==='client'){ lastHostSeen = now; if(!(hostConn && hostConn.open)) clientLost(); }
+      return;
+    }
     if(MODE==='host'){
       Object.keys(conns).forEach(k=>{
         const seat = Number(k), c = conns[k];
@@ -9558,7 +9566,7 @@ function createRoom(){
     paint();
   });
   peer.on('connection', c=>hostAccept(c));
-  peer.on('disconnected', ()=>{ try{ peer.reconnect(); }catch(e){} });
+  peer.on('disconnected', ()=>hostBrokerRetry(peer));
   peer.on('error', err=>{
     const t = err && err.type;
     if(t==='unavailable-id' && SCREEN!=='lobby' && SCREEN!=='game'){ try{ peer.destroy(); }catch(e){} return createRoom(); }
@@ -9667,8 +9675,8 @@ function connectToHost(){
   watchIce();
   c.on('open', ()=>{ window.clearTimeout(timer); lastHostSeen = Date.now(); startHeartbeat(); netStatus = 'Connected — waiting for the host…'; c.send({t:'hello', name: MY_NAME, token, v: APP_VERSION, pv: PROTOCOL_VERSION, pic: Avatar.mine, pid: typeof Profile!=='undefined' ? Profile.id() : null}); });
   c.on('data', msg=>clientReceive(msg));
-  c.on('close', ()=>clientLost());
-  c.on('error', ()=>clientLost());
+  c.on('close', ()=>{ if(hostConn===c) clientLost(); });
+  c.on('error', ()=>{ if(hostConn===c) clientLost(); });
 }
 function clientReceive(msg){
   if(!msg || typeof msg!=='object') return;
@@ -9676,6 +9684,7 @@ function clientReceive(msg){
   switch(msg.t){
     case 'ping': return;
     case 'welcome':
+      if(RECON.on){ RECON.on = false; window.clearTimeout(RECON.timer); try{ toast('Reconnected.'); }catch(e){} }
       MY_SEAT = msg.seat; MY_NAME = msg.name || MY_NAME; netStatus = '';
       try{ localStorage.setItem('tl-token-'+ROOM_CODE, msg.token); }catch(e){}
       chatLog = Array.isArray(msg.chat) ? msg.chat : [];
@@ -9705,10 +9714,50 @@ function clientReceive(msg){
       break;
   }
 }
+// 11 November: the host's link to the matchmaking server (needed for anyone to join or rejoin) is retried every 5 s
+// until it is back, instead of once
+function hostBrokerRetry(pr){
+  if(!pr || pr.destroyed || pr!==peer) return;
+  if(!pr.disconnected) return;
+  try{ pr.reconnect(); }catch(e){}
+  window.setTimeout(()=>hostBrokerRetry(pr), 5000);
+}
+/* 11 November: a lost connection is no longer the end. The guest reconnects on its own (new connection, same seat thanks to the
+   token the host gave it) and keeps trying for 2 minutes; the AI keeps the seat warm in the meantime. */
+const RECON = {on: false, started: 0, tries: 0, timer: null};
 function clientLost(){
   if(MODE!=='client') return;
-  if(SCREEN==='game' || SCREEN==='lobby'){ netErr('TL-10'); SCREEN = 'ended'; MODE = 'client-ended'; paint(); }
+  if(!(SCREEN==='game' || SCREEN==='lobby')) return;
+  if(RECON.on) return;
+  RECON.on = true; RECON.started = Date.now(); RECON.tries = 0;
+  try{ if(hostConn) hostConn.close(); }catch(e){}
+  netStatus = 'Connection lost — reconnecting…';
+  try{ toast('Connection lost — reconnecting…'); }catch(e){}
+  paint();
+  clientRetry();
 }
+function clientRetry(){
+  if(MODE!=='client' || !RECON.on) return;
+  if(hostConn && hostConn.open){ RECON.on = false; netStatus = ''; paint(); return; }
+  if(Date.now() - RECON.started > 120000){
+    RECON.on = false; netStatus = ''; netErr('TL-10'); SCREEN = 'ended'; MODE = 'client-ended'; paint(); return;
+  }
+  RECON.tries++;
+  window.clearTimeout(RECON.timer);
+  RECON.timer = window.setTimeout(clientRetry, 9000);            // next try if this one has not connected by then
+  const go = ()=>{ if(MODE==='client' && RECON.on) connectToHost(); };
+  try{
+    if(peer && !peer.destroyed && !peer.disconnected && peer.open) go();
+    else if(peer && !peer.destroyed && peer.disconnected && RECON.tries % 2===1){ peer.once('open', go); peer.reconnect(); }
+    else { try{ if(peer) peer.destroy(); }catch(e){} peer = new Peer(undefined, peerOptions()); peer.on('open', go); peer.on('error', ()=>{}); }
+  }catch(e){ try{ console.warn('Reconnect', e); }catch(_){} }
+}
+if(typeof document!=='undefined' && document.addEventListener) document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden || MODE!=='client') return;
+  lastHostSeen = Date.now();
+  if(hostConn && hostConn.open){ try{ hostConn.send({t:'pong'}); }catch(e){} }
+  else clientLost();
+});
 
 /* The endgame calculation follows the level: full strength for Grandmaster and Master, a lighter
    version (from 6 cards) for Hard, off below that. No setting for the player. */
@@ -10223,7 +10272,7 @@ const SaveGame = {
     peer = new Peer(peerIdFor(ROOM_CODE), peerOptions());
     peer.on('open', ()=>{ startHeartbeat(); netStatus = ''; addChat({sys:true, text:`Room ${ROOM_CODE} is open again. Friends can rejoin with the same code.`}); paint(); });
     peer.on('connection', c=>hostAccept(c));
-    peer.on('disconnected', ()=>{ try{ peer.reconnect(); }catch(e){} });
+    peer.on('disconnected', ()=>hostBrokerRetry(peer));
     peer.on('error', err=>{
       if(err && err.type==='unavailable-id' && attempt < 8){ try{ peer.destroy(); }catch(e){} __realSetTimeout(()=>this.reopenRoom(attempt+1), 5000); return; }
       netStatus = ''; toast('The room could not be reopened (' + (err && err.type || 'network') + '). The AI plays the empty seats.'); paint();
