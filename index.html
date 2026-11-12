@@ -7495,6 +7495,7 @@ const SOLVER_OPTIONS = [
   {key:'6',   label:'6 cards',  cards:6,  ms:800,  sample:300, note:'Calculates from 6 cards left (exact at this point). Thinking time about 0.1 s. Measured: +0.010 points per round.'},
   {key:'8',   label:'8 cards',  cards:8,  ms:1500, sample:300, note:'Calculates from 8 cards left (practically exact: same move as the full calculation in every test). Thinking time about 0.15 s. Measured: +0.012 points per round.'},
   {key:'10',  label:'10 cards', cards:10, ms:1000, sample:300, note:'Calculates from 10 cards left: exact where possible, otherwise a Monte Carlo estimate. Thinking time about 0.2 s, at most 1 s (measured 7 November: the same strength as 2 s). Measured: +0.037 points per round (the strongest setting).'},
+  {key:'12',  label:'12 cards', cards:12, ms:1000, sample:300, note:'Calculates from 12 cards left, a Monte Carlo estimate above 10. Thinking time about 0.5 s at 11-12 cards, at most 1 s. Measured 13 November on 433 positions with 11-12 cards: a different move in 24% of them, +0.046 ± 0.019 points per changed move.'},
   {key:'14',  label:'14 cards', cards:14, ms:2000, sample:300, note:'Calculates from 14 cards left, mostly as a Monte Carlo estimate. Thinking time about 0.8 s, at most 2 s. Measured: +0.030 points per round.'},
 ];
 const SOLVER_PREF_KEY = 'threeLanterns_solver_v1';
@@ -8264,7 +8265,7 @@ if(typeof document!=='undefined' && document.addEventListener && typeof window!=
 
 
 /*@@TL-ENGINE-END@@*/
-const APP_VERSION = '2026-11-12a', PROTOCOL_VERSION = 3;
+const APP_VERSION = '2026-11-13a', PROTOCOL_VERSION = 3;
 /* =====================================================================
    THREE LANTERNS — PvP layer
    ---------------------------------------------------------------------
@@ -9833,7 +9834,7 @@ if(typeof document!=='undefined' && document.addEventListener) document.addEvent
 
 /* The endgame calculation follows the level: full strength for Grandmaster and Master, a lighter
    version (from 6 cards) for Hard, off below that. No setting for the player. */
-function solverForBand(k){ return (k==='boss' || k==='master') ? '10' : k==='strong' ? '6' : 'off'; }
+function solverForBand(k){ return k==='boss' ? '12' : k==='master' ? '10' : k==='strong' ? '6' : 'off'; }
 const __beginMatch = beginMatch;
 beginMatch = function(){ if(typeof applySolverChoice==='function') applySolverChoice(solverForBand(BOT_BAND)); return __beginMatch(); };
 
