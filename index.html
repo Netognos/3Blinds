@@ -1897,8 +1897,15 @@ function sbPlayOut(){
     } else if(ph==='revealchoice'){
       finalizeNinthReveal(Math.random()<0.5);
     } else if(ph==='ninthdiscard'){
+      // 12 November: every seat that still owes its discard makes it (the sandbox has no human seats, so the old
+      // one-argument call did nothing and the playout looped until the guard)
       const pol = sb.policy[0];
-      humanDiscardNinth((pol && pol.discard ? pol.discard(0) : pickBotDiscard(state.players[0].hand)).id);
+      const todo = [0,1,2].filter(i=>!humanHasDiscardedNinth(i));
+      if(!todo.length){ finalizeNinthReveal(Math.random()<0.5); continue; }
+      const i = todo[0], hand = state.players[i].hand;
+      const card = (i===0 && pol && pol.discard) ? pol.discard(0) : pickBotDiscard(hand);
+      const hs = HUMAN_SEATS; HUMAN_SEATS = new Set([i]);
+      try{ humanDiscardNinth(i, card.id); } finally { HUMAN_SEATS = hs; }
     } else if(ph==='givecard'){
       const g = state.players[state.pendingBlindFail.giversQueue[0]];
       executeGive(g.idx, botChooseGive(g));
@@ -2461,7 +2468,50 @@ const QPLAY = {enabled: true, prio: null, margin: 0.03, peekMargin: 0.10, verify
 // except a switch to peeking, which gains nothing below 0.10 (36 cases, -0.007) and +0.21 above it.
 function bossQOn(weights){ if(!Q_NET && !(weights && weights.qNet)) return false; if(weights && weights.q!==undefined) return !!weights.q; if(SOLVER.enabled && svCardsLeft(state) <= SOLVER.maxCards) return false; return QPLAY.enabled && (!SANDBOX || !!SANDBOX.capture || !!SANDBOX.qAll); } // real decisions (and the Coach's Boss, and the Coach's replays: qAll), as tested -- not inside look-ahead simulations, and not where the real game uses the endgame calculation (so the Coach's "what would the Boss do" is the same Boss even when its calculation runs out of time)
 // expected points of each candidate for player idx, from that player's own view (several networks: their average)
+// 12 November: (a) the part of layer 1 that is the same for every candidate (what the player sees, the hand reader) is
+// computed once per decision; (b) the same question asked twice in one decision (the Q pick, then the correction model)
+// is answered from memory. The numbers are the same as before up to float rounding.
+const QV_MEMO = {st: null, idx: -1, net: null, cands: null, acts: null, h: null, out: null, hits: 0, misses: 0};
+function qvFirstLayer(n, x, nIn){
+  const L = n.layers[0], W = L.W, nOut = L.nOut;
+  if(!n.__q1 || n.__q1.length!==nOut) n.__q1 = new Float64Array(nOut);
+  const base = n.__q1, varA = PM_STATE, varB = PM_STATE + PM_ACT, brA = PM_STATE + PM_ACT + 16;
+  for(let j=0;j<nOut;j++){
+    let s = L.b[j]; const row = j*nIn;
+    for(let i=0;i<varA;i++) s += W[row+i]*x[i];
+    for(let i=varB;i<Math.min(nIn, brA);i++) s += W[row+i]*x[i];
+    base[j] = s;
+  }
+}
+function qvForward(n, x, nIn){
+  const L0 = n.layers[0], W = L0.W, base = n.__q1, nOut = L0.nOut, varA = PM_STATE, varB = PM_STATE + PM_ACT, brA = PM_STATE + PM_ACT + 16;
+  if(!n.__qb) n.__qb = n.layers.map(L=>new Float32Array(L.nOut));
+  let a = n.__qb[0];
+  for(let j=0;j<nOut;j++){
+    let s = base[j]; const row = j*nIn;
+    for(let i=varA;i<varB;i++) s += W[row+i]*x[i];
+    for(let i=brA;i<nIn;i++) s += W[row+i]*x[i];
+    a[j] = n.layers.length===1 ? s : (s>0 ? s : 0);
+  }
+  for(let li=1; li<n.layers.length; li++){
+    const L = n.layers[li], y = n.__qb[li], last = li===n.layers.length-1;
+    for(let j=0;j<L.nOut;j++){
+      let s = L.b[j]; const row = j*L.nIn;
+      for(let i=0;i<L.nIn;i++) s += L.W[row+i]*a[i];
+      y[j] = last ? s : (s>0 ? s : 0);
+    }
+    a = y;
+  }
+  return a[0];
+}
 function bossQValues(idx, cands, net){
+  const M = QV_MEMO, st0 = state;
+  if(M.st===st0 && M.idx===idx && M.net===net && M.cands===cands && M.h===st0.players[idx].hand && M.acts.length===cands.length && cands.every((c, j)=>c.act===M.acts[j])){ M.hits++; return M.out.slice(); }
+  const out = bossQValuesFresh(idx, cands, net);
+  M.st = st0; M.idx = idx; M.net = net; M.cands = cands; M.acts = cands.map(c=>c.act); M.h = st0.players[idx].hand; M.out = out.slice(); M.misses++;
+  return out;
+}
+function bossQValuesFresh(idx, cands, net){
   const st = state, h = st.players[idx].hand;
   const nets = Array.isArray(net) ? net : [net];
   // inputs, in this order: what the player sees (70), the move (26), the reader's picture of both opponents (16), what the move
@@ -2472,9 +2522,9 @@ function bossQValues(idx, cands, net){
   x.set(s, 0);
   if(nMax > PM_STATE + PM_ACT && typeof hrSummary==='function') x.set(hrSummary(st, idx, !hrOn(idx)), PM_STATE + PM_ACT);
   const withBridge = nMax >= PM_STATE + PM_ACT + 16 + 6;
-  const views = {}; nets.forEach(n=>{ const k = n.layers[0].nIn; if(!views[k]) views[k] = x.subarray(0, k); });
+  nets.forEach(n=>qvFirstLayer(n, x, n.layers[0].nIn));
   return cands.map(c=>{ x.set(pmAction(c.act, h), PM_STATE); if(withBridge) x.set(bridgeFeats(idx, c.act), PM_STATE + PM_ACT + 16);
-    let v = 0; for(const n of nets) v += nnForward(n, views[n.layers[0].nIn])[0]; return v/nets.length; });
+    let v = 0; for(const n of nets) v += qvForward(n, x, n.layers[0].nIn); return v/nets.length; });
 }
 // ---- The bridge to the endgame (1 November): what the cards you keep are worth once the endgame calculation takes over.
 // Measured with the exact calculation on thousands of leftover hands (work/hr/endgame.js, eg_an.py): per card kept, plus pairs,
@@ -5885,7 +5935,29 @@ function finalizeBlindFail(){
   afterStateChange();
 }
 
+// 12 November: bombs found directly (four of a kind; 4+ consecutive ranks in one suit) instead of trying every group of
+// 4+ cards (2^n). Same bombs, same order as the old search (by size, then by position in the hand).
 function allBombsInHand(hand){
+  const pos = new Map(); hand.forEach((c, i)=>pos.set(c, i));
+  const byRank = {}, bySuit = {};
+  for(const c of hand){ if(c.special) continue; (byRank[c.rank] = byRank[c.rank] || []).push(c); ((bySuit[c.suit] = bySuit[c.suit] || {})[c.rank] = c); }
+  const groups = [];
+  for(const r in byRank) if(byRank[r].length===4) groups.push(byRank[r].slice());
+  for(const su in bySuit){
+    const m = bySuit[su];
+    for(let a=2; a<=14; a++){
+      if(!m[a]) continue;
+      const run = [m[a]];
+      for(let b=a+1; b<=14 && m[b]; b++){ run.push(m[b]); if(run.length>=4) groups.push(run.slice()); }
+    }
+  }
+  const keyed = groups.map(g=>{ const ix = g.map(c=>pos.get(c)).sort((x, y)=>x - y); return {ix, cards: ix.map(i=>hand[i])}; });
+  keyed.sort((A, B)=>{ if(A.ix.length!==B.ix.length) return A.ix.length - B.ix.length; for(let k=0;k<A.ix.length;k++) if(A.ix[k]!==B.ix[k]) return A.ix[k] - B.ix[k]; return 0; });
+  const bombs = [];
+  for(const g of keyed){ const a = analyzeCombo(g.cards); if(a && a.type==='bomb') bombs.push(a); }
+  return bombs;
+}
+function allBombsInHandSlow(hand){
   let bombs = [];
   for(let k=4; k<=hand.length; k++){
     for(const combo of combosOfSize(hand,k)){
@@ -8192,7 +8264,7 @@ if(typeof document!=='undefined' && document.addEventListener && typeof window!=
 
 
 /*@@TL-ENGINE-END@@*/
-const APP_VERSION = '2026-11-11a', PROTOCOL_VERSION = 3;
+const APP_VERSION = '2026-11-12a', PROTOCOL_VERSION = 3;
 /* =====================================================================
    THREE LANTERNS — PvP layer
    ---------------------------------------------------------------------
