@@ -4593,6 +4593,9 @@ function pickAnchorBracket(targetElo){
 // bracketing anchors in proportion to how close the target Elo sits to
 // each one, not a single fixed bot for the whole game.
 function adaptiveAnchorConfig(){
+  // 19 November: the Grandmaster is the Boss on every decision. Its Elo range (1500-1530) sat just below the Boss anchor
+  // (1530), so 3-10% of its decisions were made by the much weaker Meta AI (1229): a random weak move now and then.
+  if(selectedEloBand==='boss') return ELO_LADDER[ELO_LADDER.length-1].config;
   const {lo,hi,f} = pickAnchorBracket(TARGET_ELO);
   return (Math.random()<f ? hi : lo).config;
 }
@@ -8266,7 +8269,7 @@ if(typeof document!=='undefined' && document.addEventListener && typeof window!=
 
 
 /*@@TL-ENGINE-END@@*/
-const APP_VERSION = '2026-11-19a', PROTOCOL_VERSION = 3;
+const APP_VERSION = '2026-11-19b', PROTOCOL_VERSION = 3;
 /* =====================================================================
    THREE LANTERNS — PvP layer
    ---------------------------------------------------------------------
