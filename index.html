@@ -7258,6 +7258,7 @@ const Coach = {
         <button class="small ${nPairs>=COACH_CFG.minTrainPairs?'primary':''}" onclick="Coach.train()" ${t.decisions?'':'disabled'}>Improve the Boss</button>
         <button class="ghost small" onclick="Coach.replayLast()" ${Tracker.summary().matches?'':'disabled'}>Replay my last match</button>
         <button class="ghost small" onclick="Coach.exportJSON()" ${t.decisions?'':'disabled'}>⬇ Export</button>
+        <button class="ghost small" onclick="GameExport.run()">⬇ Export games</button>
         <button class="ghost small" onclick="Coach.resetStats()" ${t.decisions||d.records.length?'':'disabled'}>Reset</button>
         ${m.version>0&&m.corr ? `<button class="ghost small" onclick="Coach.restoreOriginal()">Forget what it learned from me</button>` : ''}
       </div>
@@ -8265,7 +8266,7 @@ if(typeof document!=='undefined' && document.addEventListener && typeof window!=
 
 
 /*@@TL-ENGINE-END@@*/
-const APP_VERSION = '2026-11-13a', PROTOCOL_VERSION = 3;
+const APP_VERSION = '2026-11-19a', PROTOCOL_VERSION = 3;
 /* =====================================================================
    THREE LANTERNS — PvP layer
    ---------------------------------------------------------------------
@@ -10779,6 +10780,7 @@ const Settings = {
       ${this.row('passLock', 'Pass off while cards are selected', 'So you can\'t pass by accident while you\'re choosing a play')}
       <p class="muted rp-small">Saved on this device.</p>
       ${typeof Profile!=='undefined' ? Profile.html() : ''}
+      ${typeof GameExport!=='undefined' ? GameExport.html() : ''}
       ${typeof Backup!=='undefined' ? Backup.html() : ''}
       <div class="modal-actions"><button class="primary" onclick="Settings.hide()">Done</button></div>
     </div></div>`;
@@ -10998,11 +11000,48 @@ const Board = {
   const rm = renderMenu;
   renderMenu = function(){ return rm.apply(this, arguments).replace('<p class="menu-foot">', `<div class="board-row">${Board.buttonHTML()}</div><p class="menu-foot">`); };
   const mo = renderMatchOver;
-  renderMatchOver = function(){ return mo.apply(this, arguments).replace('<button onclick="resetToMenu()">Menu</button>', `${Board.buttonHTML()}<button onclick="resetToMenu()">Menu</button>`); };
+  renderMatchOver = function(){ return mo.apply(this, arguments).replace('<button onclick="resetToMenu()">Menu</button>', `${Board.buttonHTML()}<button class="ghost" onclick="GameExport.run()">⬇ Export games</button><button onclick="resetToMenu()">Menu</button>`); };
   const p3 = paint;
   paint = function(){ const r = p3.apply(this, arguments); if(Board.open){ const app = document.getElementById('app'); if(app) app.insertAdjacentHTML('beforeend', Board.modalHTML()); } return r; };
 })();
 
+/* ---------------------------------------------------------------------
+   Export games for review (19 November): one file with your recent games (every round's hands, blind cards and every
+   move), the game in progress and its saved state, so a game can be replayed move by move somewhere else. On a phone the
+   share sheet opens (save to Files, send by mail or chat); elsewhere the file is downloaded.
+   --------------------------------------------------------------------- */
+const GameExport = {
+  build(){
+    let saved = null; try{ saved = typeof SaveGame!=='undefined' ? SaveGame.load() : null; }catch(e){}
+    let coach = null; try{ if(typeof Coach!=='undefined' && Coach.data) coach = {totals: Coach.data.totals, matches: (Coach.data.matches || []).slice(-20)}; }catch(e){}
+    const games = (()=>{ try{ return Tracker.loadAll().slice(-20); }catch(e){ return []; } })();
+    return {app: 'Three Blinds', kind: 'games', version: APP_VERSION, exportedAt: new Date().toISOString(),
+      band: typeof BOT_BAND!=='undefined' ? BOT_BAND : null, solver: typeof SOLVER!=='undefined' ? {cards: SOLVER.maxCards, ms: SOLVER.budgetMs} : null,
+      games, current: Tracker.current || null, saved, coach,
+      live: state && SCREEN==='game' ? {phase: state.phase, round: state.round, log: (state.log || []).slice(0, 200)} : null};
+  },
+  fileName(){ return `three-blinds-games-${new Date().toISOString().slice(0,16).replace(/[:T]/g, '-')}.json`; },
+  async run(){
+    let data;
+    try{ data = JSON.stringify(this.build()); }catch(e){ toast('The games could not be exported: ' + e); return; }
+    const name = this.fileName();
+    try{
+      const file = new File([data], name, {type: 'application/json'});
+      if(navigator.canShare && navigator.canShare({files: [file]})){ await navigator.share({files: [file], title: 'Three Blinds games'}); return; }
+    }catch(e){ if(e && e.name==='AbortError') return; }
+    const url = URL.createObjectURL(new Blob([data], {type: 'application/json'}));
+    const a = document.createElement('a'); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 4000);
+    toast('Exported ' + name);
+  },
+  count(){ try{ return Tracker.loadAll().length + (Tracker.current ? 1 : 0); }catch(e){ return 0; } },
+  html(){
+    return `<h3>Export games</h3>
+      <div class="set-row"><span class="set-txt"><b>Games for review</b><span>${(n=>n===0 ? 'The game in progress' : n===1 ? 'Your last game' : 'Your last ' + n + ' games')(Math.min(20, this.count()))}, with every hand, blind card and move, as one file</span></span>
+        <button class="small" onclick="GameExport.run()">⬇ Export games</button></div>`;
+  },
+};
 /* ---------------------------------------------------------------------
    Profile (7 November): every device gets one player ID the first time the app opens. The name can change as often as you
    like; the ID stays, so the leaderboard keeps one row per person. Online, everyone's ID travels with the hello and the
